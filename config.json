@@ -1,0 +1,15 @@
+{
+    "address": "127.0.0.1",
+    "port": 8080,
+    "workers": 0,
+    "cors": {
+        "enabled": false,
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Allow-Origin": "*"
+    },
+    "experimental": {
+        "preload-files": 3,
+        "preload-folders": 3
+    }
+}
