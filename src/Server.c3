@@ -102,7 +102,7 @@ fn void alloc_buffer(UVHandle *handle, CLong suggested_size, UVBuf *buf) {
 
 fn void write_uv_data(UVStream* client, void* data, usz len, int need_copy_data, int need_free_data) {
     UVBuf* buf = allocator::new((OnStackAllocator*) client.data, UVBuf);
-    defer allocator::free((OnStackAllocator*)client.data, data);
+//    defer allocator::free((OnStackAllocator*)client.data, data);
     defer allocator::free((OnStackAllocator*)client.data, buf);
 	if(data == null || len == 0) {
 		return;
@@ -133,57 +133,10 @@ fn void echo_read(UVStream *client, CLong nread, UVBuf *buf) {
         }
 
         tty_log(DEBUG, "-> %s %s", req.method, req.uri);
-        HttpResponse res;
+        ZString ret = "HTTP/1.1 200 OK\r\n\r\nPong";
         
-        HashMap(<String,String>) args;
-        args.new_init(allocator: _alloc);
-        RouteFunction func = routes::get_route(req.uri, &args, _alloc);
-        Object* tags = routes::tagsMap[args["reverse_path"]!!]??null;
-        res.headers.new_init(allocator: _alloc);
-
-        if (tags != null) {
-            if ((tags.get_string("file")??"") != "") {
-                args["filename"] = utils::format_path(tags.get_string("file")!!, &args)??tags.get_string("file")!!;
-                func = &routes::file;
-            }
-            else if ((tags.get_string("folder")??"") != "") {
-                String folder = tags.get_string("folder")!!;
-                args["foldername"] = utils::format_path(folder, &args)??folder;
-                func = &routes::folder;
-            }
-        }
-
-        if (cors_config && cors_config.get_bool("enabled")??false) {
-            if (req.method == HttpVerb.OPTIONS) {
-                res.status = HttpStatus.OK;
-                res.body = dstring::new(`{"status":200}`, _alloc);
-
-                res.headers.add_header("Access-Control-Allow-Methods", cors_config.get_string("Access-Control-Allow-Methods")??"");
-                res.headers.add_header("Access-Control-Allow-Headers", cors_config.get_string("Access-Control-Allow-Headers")??"");
-
-                res.headers.add_header("Content-Type", "application/json");
-            } else {
-                ControllerParadise cref;
-                cref.req = *req;
-                cref.args = args;
-                cref.allocator = _alloc;
-                res = func(&cref);
-            }
-            res.headers.add_header("Access-Control-Allow-Origin", cors_config.get_string("Access-Control-Allow-Origin")??"");
-        } else {
-            ControllerParadise cref;
-            cref.req = *req;
-            cref.args = args;
-            cref.allocator = _alloc;
-            res = func(&cref);
-        }
-        tty_log(DEBUG, "<- %s %s", res.status, req.uri);
-        ZString ret = res.zwrite(client.data);
         write_uv_data(client,ret,ret.len(),1,1);
-        args.free();
-        res.free();
-        // allocator::free(_alloc, res);
-        allocator::free(_alloc, ret);
+//        allocator::free(_alloc, ret);
     }
     else if (nread < 0) {
         libuv::uv_close(client, &on_close);
@@ -210,6 +163,7 @@ fn void worker_thread(void* arg) {
     UVTcp tcp;
     libuv::uv_tcp_init(&loop, &tcp);
     libuv::uv_tcp_open(&tcp, *((UVOsSock*) arg));
+    libuv::uv_tcp_keepalive(&tcp, 1, 1);
     
     libuv::uv_listen((UVStream*) &tcp, DEFAULT_BACKLOG, &on_new_connection);
     libuv::uv_run(&loop, UV_RUN_DEFAULT);
@@ -398,6 +352,7 @@ fn int start_server(Config config) {
     libuv::uv_tcp_init(loop, _server);
     libuv::uv_ip4_addr((CChar*) config.address.zstr_copy(&c3web::alloc), config.port, &addr);
     libuv::uv_tcp_bind(_server, (Platform_sockaddr*)&addr, 0);
+    libuv::uv_tcp_keepalive(_server, 1, 1);
     libuv::uv_tcp_simultaneous_accepts(_server, 1);
     UVOsSock sock;
     libuv::uv_fileno((UVHandle*) _server, (UVOsFd*) &sock);
