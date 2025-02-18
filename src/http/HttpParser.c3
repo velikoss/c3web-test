@@ -1,9 +1,12 @@
 module c3web;
 import libc;
+import std::io;
 
 const HTTP_MAX_HEADER_SIZE = 8 * 1024;
 def HttpCb = fn int (HttpParser*);
 def HttpDataCb = fn int (HttpParser*, char* at, usz length);
+
+const HTTP_PARSER_STRICT = $feature(HTTP_PARSER_STRICT) ? true : false;
 
 struct HttpParserSettings {
     HttpCb     on_message_begin;
@@ -15,6 +18,17 @@ struct HttpParserSettings {
     HttpDataCb on_body;
     HttpCb     on_message_complete;
 }
+
+enum Flags : int (inline int flag)
+{ F_CHUNKED               = 1 << 0
+    , F_CONNECTION_KEEP_ALIVE = 1 << 1
+    , F_CONNECTION_CLOSE      = 1 << 2
+    , F_CONNECTION_UPGRADE    = 1 << 3
+    , F_TRAILING              = 1 << 4
+    , F_UPGRADE               = 1 << 5
+    , F_SKIPBODY              = 1 << 6
+}
+    
 
 struct HttpParser {
     bitstruct : uint 
@@ -42,7 +56,7 @@ struct HttpParser {
     void *data;
 }
 
-enum HttpParserType { HTTP_REQUEST, HTTP_RESPONSE, HTTP_BOTH }
+enum HttpParserType : inline uint { HTTP_REQUEST, HTTP_RESPONSE, HTTP_BOTH }
 
 enum ParserState: inline uint { 
     S_ZERO
@@ -116,6 +130,36 @@ enum ParserState: inline uint {
     , S_MESSAGE_DONE
 }
 
+enum HttpMethod : inline uint (ZString name) {
+    HTTP_DELETE = "HTTP_DELETE",
+    HTTP_GET = "HTTP_GET",
+    HTTP_HEAD = "HTTP_HEAD",
+    HTTP_POST = "HTTP_POST",
+    HTTP_PUT = "HTTP_PUT",
+    HTTP_CONNECT = "HTTP_CONNECT",
+    HTTP_OPTIONS = "HTTP_OPTIONS",
+    HTTP_TRACE = "HTTP_TRACE",
+    HTTP_COPY = "HTTP_COPY",
+    HTTP_LOCK = "HTTP_LOCK",
+    HTTP_MKCOL = "HTTP_MKCOL",
+    HTTP_MOVE = "HTTP_MOVE",
+    HTTP_PROPFIND = "HTTP_PROPFIND",
+    HTTP_PROPPATCH = "HTTP_PROPPATCH",
+    HTTP_SEARCH = "HTTP_SEARCH",
+    HTTP_UNLOCK = "HTTP_UNLOCK",
+    HTTP_REPORT = "HTTP_REPORT",
+    HTTP_MKACTIVITY = "HTTP_MKACTIVITY",
+    HTTP_CHECKOUT = "HTTP_CHECKOUT",
+    HTTP_MERGE = "HTTP_MERGE",
+    HTTP_MSEARCH = "HTTP_MSEARCH",
+    HTTP_NOTIFY = "HTTP_NOTIFY",
+    HTTP_SUBSCRIBE = "HTTP_SUBSCRIBE",
+    HTTP_UNSUBSCRIBE = "HTTP_UNSUBSCRIBE",
+    HTTP_PATCH = "HTTP_PATCH",
+    HTTP_PURGE = "HTTP_PURGE",
+    HTTP_MKCALENDAR = "HTTP_MKCALENDAR"
+}
+
 enum HttpErrno : inline uint (ZString message) {
     OK = "success",
     CB_MESSAGE_BEGIN = "the on_message_begin callback failed",
@@ -154,18 +198,18 @@ fn void HttpParser.init(HttpParser* self, HttpParserType t) {
     libc::memset(self, 0, HttpParser.sizeof);
     self.data = data;
     self.type = t.ordinal;
-    self.state = (t == HTTP_REQUEST ? ParserState.S_START_REQ : (t == HTTP_RESPONSE ? ParserState.S_START_RES : ParserState.S_START_REQ_OR_RES));
+    self.state = (t == HttpParserType.HTTP_REQUEST ? ParserState.S_START_REQ : (t == HTTP_RESPONSE ? ParserState.S_START_RES : ParserState.S_START_REQ_OR_RES));
     self.http_errno = HttpErrno.OK;
 }
 
 macro char @t(#v) {
-    $if HTTP_PARSER_STRICT
+    $if HTTP_PARSER_STRICT:
         return 0;
     $endif
     return #v;
 }
 
-const char tokens[256] = {
+char[128] tokens = {
     /*   0 nul    1 soh    2 stx    3 etx    4 eot    5 enq    6 ack    7 bel  */
     0,       0,       0,       0,       0,       0,       0,       0,
     /*   8 bs     9 ht    10 nl    11 vt    12 np    13 cr    14 so    15 si   */
@@ -199,7 +243,7 @@ const char tokens[256] = {
     /* 120  x   121  y   122  z   123  {   124  |   125  }   126  ~   127 del */
     'x',     'y',     'z',      0,      '|',      0,      '~',       0 };
 
-const char normal_url_char[32] = {
+char[16] normal_url_char= {
     /*   0 nul    1 soh    2 stx    3 etx    4 eot    5 enq    6 ack    7 bel  */
     0    |   0    |   0    |   0    |   0    |   0    |   0    |   0,
     /*   8 bs     9 ht    10 nl    11 vt    12 np    13 cr    14 so    15 si   */
@@ -231,10 +275,10 @@ const char normal_url_char[32] = {
     /* 112  p   113  q   114  r   115  s   116  t   117  u   118  v   119  w  */
     1    |   2    |   4    |   8    |   16   |   32   |   64   |  128,
     /* 120  x   121  y   122  z   123  {   124  |   125  }   126  ~   127 del */
-    1    |   2    |   4    |   8    |   16   |   32   |   64   |   0,
+    1    |   2    |   4    |   8    |   16   |   32   |   64   |   0
     };
 
-enum HeaderStates
+enum HeaderStates : inline uint
 { H_GENERAL
     , H_C
     , H_CO
@@ -262,7 +306,7 @@ enum HeaderStates
     , H_CONNECTION_KEEP_ALIVE
     , H_CONNECTION_CLOSE
     , H_CONNECTION_UPGRADE
-};
+}
 
 enum HttpHostState {
       S_HTTP_HOST_ZERO
@@ -276,7 +320,15 @@ enum HttpHostState {
     , S_HTTP_HOST_V6_END
     , S_HTTP_HOST_PORT_START
     , S_HTTP_HOST_PORT
-};
+}
+
+macro bool @is_mark(char c) {
+    return ((c) == '-' || (c) == '_' || (c) == '.' || (c) == '!' || (c) == '~' || (c) == '*' || (c) == '\'' || (c) == '(' || (c) == ')');
+}
+
+macro bool @is_userinfo_char(c) {
+    return @is_alpha(c) || (c >= '0' && c <= '9') || @is_mark(c) || (c) == '%' || (c) == ';' || (c) == ':' || (c) == '&' || (c) == '=' || (c) == '+' || (c) == '$' || (c) == ',';
+}
 
 macro char @token(#c) @if(HTTP_PARSER_STRICT) {
     return tokens[#c];
@@ -286,9 +338,9 @@ macro char @token(#c) @if(!HTTP_PARSER_STRICT) {
     return #c == ' ' ? ' ' : tokens[#c];
 }
 
-macro uint @bit_at(#a, #i) {
-    return (!!((uint)(#a)[(uint)(#i) >> 3] & 
-                (1 << ((uint)(#i) & 7))));
+macro bool @bit_at(#a, #i) {
+    return (!(!((uint)(#a)[(uint)(#i) >> 3] & 
+                (1 << ((uint)(#i) & 7)))));
 }
 
 macro bool @is_url_char(#c) {
@@ -304,17 +356,17 @@ macro bool @count_header_size(#parser, #v) {
     return false;
 }
 
-macro long @callback_data(#self, #settings, #p_state, #p, #data, #a) {                                                              
+macro long @callback_data(#self, #settings, #p_state, #p, char* data, #a, #mark) {                                                              
     assert(#self.http_errno == HttpErrno.OK);                   
     if (@likely(#settings.#a != null)) {                    
-        #self.state = p_state;
-        if (@unlikely(0 != #settings.#a(self))) {
+        #self.state = #p_state;
+        if (@unlikely(0 != #settings.#a(#self, #mark, #p - #mark))) {
             #self.http_errno = HttpErrno.CB_MESSAGE_COMPLETE;
         }
-        #p_state = ParserState.from_ordinal(self.state);
+        #p_state = ParserState.from_ordinal(#self.state);
         /* We either errored above or got paused; get out */
         if (@unlikely(#self.http_errno != HttpErrno.OK)) {
-            return ((char*)p - (char*)data + 1);
+            return (((char*)#p) - (data) + 1);
         }
     }
     return -1;
@@ -324,14 +376,14 @@ macro long @callback_notify(#self, #settings, #p_state, #p, #data, #a) {
     do {                                                                 
         assert(#self.http_errno == HttpErrno.OK);                   
         if (@likely(#settings.#a != null)) {                    
-            #self.state = p_state;
-            if (@unlikely(0 != #settings.#a(self))) {
+            #self.state = #p_state;
+            if (@unlikely(0 != #settings.#a(#self))) {
                 #self.http_errno = HttpErrno.CB_MESSAGE_COMPLETE; // todo better errno
             }
-            #p_state = ParserState.from_ordinal(self.state);
+            #p_state = ParserState.from_ordinal(#self.state);
             /* We either errored above or got paused; get out */
             if (@unlikely(#self.http_errno != HttpErrno.OK)) {
-                return ((char*)p - (char*)data);
+                return (((char*)#p) - ((char*)#data));
             }
         }
     } while(0);
@@ -339,7 +391,7 @@ macro long @callback_notify(#self, #settings, #p_state, #p, #data, #a) {
 }
 
 macro char @lower(#ch) {
-    return #ch >= 'a' && #ch < 'z' ? ch : ch - 'A' + 'a';
+    return #ch >= 'a' && #ch < 'z' ? #ch : #ch - 'A' + 'a';
 }
 
 macro bool @is_alpha(#ch) {
@@ -351,14 +403,14 @@ macro ParserState @parse_url_char(#s, #ch) {
         return S_DEAD;
     }
 
-$if HTTP_PARSER_STRICT
+    $if HTTP_PARSER_STRICT:
     if (#ch == '\t' || #ch == '\f') {
         return S_DEAD;
     }
-$endif
+    $endif
 
     switch (#s) {
-        case s_req_spaces_before_url:
+        case S_REQ_SPACES_BEFORE_URL:
             if (#ch == '/' || #ch == '*') {
                 return S_REQ_PATH;
             }
@@ -367,7 +419,7 @@ $endif
             }
             break;
 
-        case s_req_schema:
+        case S_REQ_SCHEMA:
             if (@is_alpha(#ch)) {
                 return #s;
             }
@@ -404,12 +456,12 @@ $endif
             if (#ch == '@') {
                 return S_REQ_SERVER_WITH_AT;
             }
-            if (IS_USERINFO_CHAR(#ch) || #ch == '[' || #ch == ']') {
+            if (@is_userinfo_char(#ch) || #ch == '[' || #ch == ']') {
                 return S_REQ_SERVER;
             }
             break;
 
-        case s_req_path:
+        case S_REQ_PATH:
             if (@is_url_char(#ch)) {
                 return #s;
             }
@@ -469,6 +521,8 @@ const PROXY_CONNECTION = "proxy-connection";
 const CONTENT_LENGTH = "content-length";
 const TRANSFER_ENCODING = "transfer-encoding";
 const UPGRADE = "upgrade";
+
+extern fn void* memchr(void* s, int c, usz n);
 
 fn usz HttpParser.execute(HttpParser* self, HttpParserSettings* settings, ZString data, usz len) {
     char c, ch;
@@ -548,12 +602,12 @@ fn usz HttpParser.execute(HttpParser* self, HttpParserSettings* settings, ZStrin
                         p_state = S_RES_OR_RESP_H;
                         @callback_notify(self, settings, p_state, p, data, on_message_begin);
                     } else {
-                        self.type = HTTP_REQUEST;
+                        self.type = HttpParserType.HTTP_REQUEST;
                         p_state = S_START_REQ;
                         --p;
                     }
                     break;
-                case S_START_REQ:
+                case S_START_RES:
                     self.flags = 0;
                     self.content_length = usz.max;
                     switch (ch) {
@@ -602,7 +656,7 @@ fn usz HttpParser.execute(HttpParser* self, HttpParserSettings* settings, ZStrin
                         self.http_errno = HttpErrno.INVALID_VERSION;
                         break ERROR;
                     }
-                    parser.http_major = ch - '0';
+                    self.http_major = ch - '0';
                     p_state = S_RES_HTTP_MAJOR;
                     break;
                 case S_RES_HTTP_MAJOR:
@@ -687,12 +741,12 @@ fn usz HttpParser.execute(HttpParser* self, HttpParserSettings* settings, ZStrin
                 case S_RES_STATUS_START:
                     if (ch == '\r') {
                         p_state = S_RES_LINE_ALMOST_DONE;
-                        @callback_data(self, settings, p_state, p, data, on_status);
+                        @callback_data(self, settings, p_state, p, data, on_status, status_mark);
                         break;
                     }
                     if (ch == '\n') {
                         p_state = S_HEADER_FIELD_START;
-                        @callback_data(self, settings, p_state, p, data, on_status);
+                        @callback_data(self, settings, p_state, p, data, on_status, status_mark);
                         break;
                     }
                     break;
@@ -717,43 +771,43 @@ fn usz HttpParser.execute(HttpParser* self, HttpParserSettings* settings, ZStrin
                     self.index = 1;
                     switch (ch) {
                         case 'C': 
-                            self.method = HTTP_CONNECT; 
+                            self.method = HttpMethod.HTTP_CONNECT; 
                             break;
                         case 'D': 
-                            self.method = HTTP_DELETE; 
+                            self.method = HttpMethod.HTTP_DELETE; 
                             break;
                         case 'G': 
-                            self.method = HTTP_GET; 
+                            self.method = HttpMethod.HTTP_GET; 
                             break;
                         case 'H': 
-                            self.method = HTTP_HEAD; 
+                            self.method = HttpMethod.HTTP_HEAD; 
                             break;
                         case 'L': 
-                            self.method = HTTP_LOCK; 
+                            self.method = HttpMethod.HTTP_LOCK; 
                             break;
                         case 'M': 
-                            self.method = HTTP_MKCOL; 
+                            self.method = HttpMethod.HTTP_MKCOL; 
                             break;
                         case 'N': 
-                            self.method = HTTP_NOTIFY; 
+                            self.method = HttpMethod.HTTP_NOTIFY; 
                             break;
                         case 'O': 
-                            self.method = HTTP_OPTIONS; 
+                            self.method = HttpMethod.HTTP_OPTIONS; 
                             break;
                         case 'P': 
-                            self.method = HTTP_POST; 
+                            self.method = HttpMethod.HTTP_POST; 
                             break;
                         case 'R': 
-                            self.method = HTTP_REPORT; 
+                            self.method = HttpMethod.HTTP_REPORT; 
                             break;
                         case 'S': 
-                            self.method = HTTP_SUBSCRIBE; 
+                            self.method = HttpMethod.HTTP_SUBSCRIBE; 
                             break;
                         case 'T': 
-                            self.method = HTTP_TRACE; 
+                            self.method = HttpMethod.HTTP_TRACE; 
                             break;
                         case 'U': 
-                            self.method = HTTP_UNLOCK; 
+                            self.method = HttpMethod.HTTP_UNLOCK; 
                             break;
                         default:
                             self.http_errno = HttpErrno.INVALID_METHOD;
@@ -770,64 +824,64 @@ fn usz HttpParser.execute(HttpParser* self, HttpParserSettings* settings, ZStrin
                         break ERROR; // Jump to the ERROR label for handling
                     }
 
-                    matcher = method_strings[self.method];
+                    matcher = HttpMethod.from_ordinal(self.method).name;
                     if (ch == ' ' && matcher[self.index] == '\0') {
                         p_state = S_REQ_SPACES_BEFORE_URL; // Update state
                     } else if (ch == matcher[self.index]) {
                         // No action needed
-                    } else if (self.method == HTTP_CONNECT) {
+                    } else if (self.method == HttpMethod.HTTP_CONNECT) {
                         if (self.index == 1 && ch == 'H') {
-                            self.method = HTTP_CHECKOUT;
+                            self.method = HttpMethod.HTTP_CHECKOUT;
                         } else if (self.index == 2 && ch == 'P') {
-                            self.method = HTTP_COPY;
+                            self.method = HttpMethod.HTTP_COPY;
                         } else {
                             self.http_errno = HttpErrno.INVALID_METHOD; // Set the error for invalid method
                             break ERROR; // Jump to the ERROR label for handling
                         }
-                    } else if (self.method == HTTP_MKCOL) {
+                    } else if (self.method == HttpMethod.HTTP_MKCOL) {
                         if (self.index == 1 && ch == 'O') {
-                            self.method = HTTP_MOVE;
+                            self.method = HttpMethod.HTTP_MOVE;
                         } else if (self.index == 1 && ch == 'E') {
-                            self.method = HTTP_MERGE;
+                            self.method = HttpMethod.HTTP_MERGE;
                         } else if (self.index == 1 && ch == '-') {
-                            self.method = HTTP_MSEARCH;
+                            self.method = HttpMethod.HTTP_MSEARCH;
                         } else if (self.index == 2 && ch == 'A') {
-                            self.method = HTTP_MKACTIVITY;
+                            self.method = HttpMethod.HTTP_MKACTIVITY;
                         } else if (self.index == 3 && ch == 'A') {
-                            self.method = HTTP_MKCALENDAR;
+                            self.method = HttpMethod.HTTP_MKCALENDAR;
                         } else {
                             self.http_errno = HttpErrno.INVALID_METHOD; // Set the error for invalid method
                             break ERROR; // Jump to the ERROR label for handling
                         }
-                    } else if (self.method == HTTP_SUBSCRIBE) {
+                    } else if (self.method == HttpMethod.HTTP_SUBSCRIBE) {
                         if (self.index == 1 && ch == 'E') {
-                            self.method = HTTP_SEARCH;
+                            self.method = HttpMethod.HTTP_SEARCH;
                         } else {
                             self.http_errno = HttpErrno.INVALID_METHOD; // Set the error for invalid method
                             break ERROR; // Jump to the ERROR label for handling
                         }
-                    } else if (self.index == 1 && self.method == HTTP_POST) {
+                    } else if (self.index == 1 && self.method == HttpMethod.HTTP_POST) {
                         if (ch == 'R') {
-                            self.method = HTTP_PROPFIND; // or HTTP_PROPPATCH
+                            self.method = HttpMethod.HTTP_PROPFIND; // or HTTP_PROPPATCH
                         } else if (ch == 'U') {
-                            self.method = HTTP_PUT; // or HTTP_PURGE
+                            self.method = HttpMethod.HTTP_PUT; // or HTTP_PURGE
                         } else if (ch == 'A') {
-                            self.method = HTTP_PATCH;
+                            self.method = HttpMethod.HTTP_PATCH;
                         } else {
                             self.http_errno = HttpErrno.INVALID_METHOD;
                             break ERROR;
                         }
                     } else if (self.index == 2) {
-                        if (self.method == HTTP_PUT) {
+                        if (self.method == HttpMethod.HTTP_PUT) {
                             if (ch == 'R') {
-                                self.method = HTTP_PURGE;
+                                self.method = HttpMethod.HTTP_PURGE;
                             } else {
                                 self.http_errno = HttpErrno.INVALID_METHOD;
                                 break ERROR;
                             }
-                        } else if (self.method == HTTP_UNLOCK) {
+                        } else if (self.method == HttpMethod.HTTP_UNLOCK) {
                             if (ch == 'S') {
-                                self.method = HTTP_UNSUBSCRIBE;
+                                self.method = HttpMethod.HTTP_UNSUBSCRIBE;
                             } else {
                                 self.http_errno = HttpErrno.INVALID_METHOD;
                                 break ERROR;
@@ -836,8 +890,8 @@ fn usz HttpParser.execute(HttpParser* self, HttpParserSettings* settings, ZStrin
                             self.http_errno = HttpErrno.INVALID_METHOD; // Set the error for invalid method
                             break ERROR; // Jump to the ERROR label for handling
                         }
-                    } else if (self.index == 4 && self.method == HTTP_PROPFIND && ch == 'P') {
-                        self.method = HTTP_PROPPATCH;
+                    } else if (self.index == 4 && self.method == HttpMethod.HTTP_PROPFIND && ch == 'P') {
+                        self.method = HttpMethod.HTTP_PROPPATCH;
                     } else {
                         self.http_errno = HttpErrno.INVALID_METHOD; // Set the error for invalid method
                         break ERROR; // Jump to the ERROR label for handling
@@ -850,7 +904,7 @@ fn usz HttpParser.execute(HttpParser* self, HttpParserSettings* settings, ZStrin
                     if (url_mark == null) {
                         url_mark = p;
                     }
-                    if (self.method == HTTP_CONNECT) {
+                    if (self.method == HttpMethod.HTTP_CONNECT) {
                         p_state = S_REQ_SERVER_START;
                     }
                     p_state = S_REQ_SERVER_START;
@@ -884,14 +938,14 @@ fn usz HttpParser.execute(HttpParser* self, HttpParserSettings* settings, ZStrin
                     switch (ch) {
                         case ' ':
                             p_state = S_REQ_HTTP_START;
-                            @callback_data(self, settings, p_state, p, data, on_url);
+                            @callback_data(self, settings, p_state, p, data, on_url, url_mark);
                             break;
                         case '\r':
                         case '\n':
                             self.http_major = 0;
                             self.http_minor = 0;
                             p_state = ch == '\r' ? S_REQ_LINE_ALMOST_DONE : S_HEADER_FIELD_START;
-                            @callback_data(self, settings, p_state, p, data, on_url);
+                            @callback_data(self, settings, p_state, p, data, on_url, url_mark);
                             break;
                         default:
                             p_state = @parse_url_char(p_state, ch);
@@ -910,31 +964,31 @@ fn usz HttpParser.execute(HttpParser* self, HttpParserSettings* settings, ZStrin
                             break;
                         default:
                             self.http_errno = HttpErrno.INVALID_CONSTANT;
-                            goto ERROR;
+                            break ERROR;
                     }
                     break;
-                                case S_RES_H:
+                case S_REQ_HTTP_H:
                     if (ch != 'T') {
                         self.http_errno = HttpErrno.STRICT;
                         break ERROR;
                     }
-                    p_state = S_RES_HT;
+                    p_state = S_REQ_HTTP_HT;
                     break;
-                case S_REQ_HT:
+                case S_REQ_HTTP_HT:
                     if (ch != 'T') {
                         self.http_errno = HttpErrno.STRICT;
                         break ERROR;
                     }
-                    p_state = S_REQ_HTT;
+                    p_state = S_REQ_HTTP_HTT;
                     break;
-                case S_REQ_HTT:
+                case S_REQ_HTTP_HTT:
                     if (ch != 'P') {
                         self.http_errno = HttpErrno.STRICT;
                         break ERROR;
                     }
-                    p_state = S_REQ_HTTP;
+                    p_state = S_REQ_HTTP_HTTP;
                     break;
-                case S_REQ_HTTP:
+                case S_REQ_HTTP_HTTP:
                     if (ch != '/') {
                         self.http_errno = HttpErrno.STRICT;
                         break ERROR;
@@ -946,7 +1000,7 @@ fn usz HttpParser.execute(HttpParser* self, HttpParserSettings* settings, ZStrin
                         self.http_errno = HttpErrno.INVALID_VERSION;
                         break ERROR;
                     }
-                    parser.http_major = ch - '0';
+                    self.http_major = ch - '0';
                     p_state = S_REQ_HTTP_MAJOR;
                     break;
                 case S_REQ_HTTP_MAJOR:
@@ -1029,18 +1083,18 @@ fn usz HttpParser.execute(HttpParser* self, HttpParserSettings* settings, ZStrin
 
                     switch (c) {
                         case 'c':
-                            self.header_state = H_C;
+                            self.header_state = HeaderStates.H_C;
                             break;
                         case 'p':
-                            self.header_state = H_MATCHING_PROXY_CONNECTION;
+                            self.header_state = HeaderStates.H_MATCHING_PROXY_CONNECTION;
                             break;
                         case 't':
-                            self.header_state = H_MATCHING_TRANSFER_ENCODING;
+                            self.header_state = HeaderStates.H_MATCHING_TRANSFER_ENCODING;
                             break;
                         case 'u':
-                            self.header_state = H_MATCHING_UPGRADE;
+                            self.header_state = HeaderStates.H_MATCHING_UPGRADE;
                         default:
-                            self.header_state = H_GENERAL;
+                            self.header_state = HeaderStates.H_GENERAL;
                     }
                     break;
                 case S_HEADER_FIELD:
@@ -1051,80 +1105,80 @@ fn usz HttpParser.execute(HttpParser* self, HttpParserSettings* settings, ZStrin
                         if (!c) break;
 
                         switch (self.header_state) {
-                            case H_GENERAL: break;
-                            case H_C:
+                            case HeaderStates.H_GENERAL: break;
+                            case HeaderStates.H_C:
                                 self.index++;
-                                self.header_state = (c == 'o' ? H_CO : H_GENERAL);
+                                self.header_state = (c == 'o' ? HeaderStates.H_CO : HeaderStates.H_GENERAL);
                                 break;
-                            case H_CO:
+                            case HeaderStates.H_CO:
                                 self.index++;
-                                self.header_state = (c == 'n' ? H_CON : H_GENERAL);
+                                self.header_state = (c == 'n' ? HeaderStates.H_CON : HeaderStates.H_GENERAL);
                                 break;
-                            case H_CON:
+                            case HeaderStates.H_CON:
                                 self.index++;
                                 switch (c) {
                                     case 'n':
-                                        self.header_state = H_MATCHING_CONNECTION;
+                                        self.header_state = HeaderStates.H_MATCHING_CONNECTION;
                                         break;
                                     case 't':
-                                        self.header_state = H_MATCHING_CONTENT_LENGTH;
+                                        self.header_state = HeaderStates.H_MATCHING_CONTENT_LENGTH;
                                         break;
                                     default:
-                                        self.header_state = H_GENERAL;
+                                        self.header_state = HeaderStates.H_GENERAL;
                                         break;
                                 }
                                 break;
-                            case H_MATCHING_CONNECTION:
+                            case HeaderStates.H_MATCHING_CONNECTION:
                                 self.index++;
-                                if (self.index > CONNECTION.sizeof-1 || c != CONNECTION[self.index]) {
-                                    self.header_state = H_GENERAL;
-                                } else if (self.index == CONNECTION.sizeof-2) {
-                                    self.header_state = H_CONNECTION;
+                                if (self.index > CONNECTION.len-1 || c != CONNECTION[self.index]) {
+                                    self.header_state = HeaderStates.H_GENERAL;
+                                } else if (self.index == CONNECTION.len-2) {
+                                    self.header_state = HeaderStates.H_CONNECTION;
                                 }
                                 break;
-                            case H_MATCHING_PROXY_CONNECTION:
+                            case HeaderStates.H_MATCHING_PROXY_CONNECTION:
                                 self.index++;
-                                if (self.index > PROXY_CONNECTION.sizeof-1 || c != PROXY_CONNECTION[self.index]) {
-                                    self.header_state = H_GENERAL;
-                                } else if (self.index == PROXY_CONNECTION.sizeof-2) {
-                                    self.header_state = H_CONNECTION;
+                                if (self.index > PROXY_CONNECTION.len-1 || c != PROXY_CONNECTION[self.index]) {
+                                    self.header_state = HeaderStates.H_GENERAL;
+                                } else if (self.index == PROXY_CONNECTION.len-2) {
+                                    self.header_state = HeaderStates.H_CONNECTION;
                                 }
                                 break;
-                            case H_MATCHING_CONTENT_LENGTH:
+                            case HeaderStates.H_MATCHING_CONTENT_LENGTH:
                                 self.index++;
-                                if (self.index > CONTENT_LENGTH.sizeof-1 || c != CONTENT_LENGTH[self.index]) {
-                                    self.header_state = H_GENERAL;
-                                } else if (self.index == CONTENT_LENGTH.sizeof-2) {
-                                    self.header_state = H_CONTENT_LENGTH;
+                                if (self.index > CONTENT_LENGTH.len-1 || c != CONTENT_LENGTH[self.index]) {
+                                    self.header_state = HeaderStates.H_GENERAL;
+                                } else if (self.index == CONTENT_LENGTH.len-2) {
+                                    self.header_state = HeaderStates.H_CONTENT_LENGTH;
                                 }
                                 break;
-                            case H_MATCHING_TRANSFER_ENCODING:
+                            case HeaderStates.H_MATCHING_TRANSFER_ENCODING:
                                 self.index++;
-                                if (self.index > TRANSFER_ENCODING.sizeof-1 || c != TRANSFER_ENCODING[self.index]) {
-                                    self.header_state = H_GENERAL;
-                                } else if (self.index == TRANSFER_ENCODING.sizeof-2) {
-                                    self.header_state = H_TRANSFER_ENCODING;
+                                if (self.index > TRANSFER_ENCODING.len-1 || c != TRANSFER_ENCODING[self.index]) {
+                                    self.header_state = HeaderStates.H_GENERAL;
+                                } else if (self.index == TRANSFER_ENCODING.len-2) {
+                                    self.header_state = HeaderStates.H_TRANSFER_ENCODING;
                                 }
                                 break;
-                            case H_MATCHING_UPGRADE:
+                            case HeaderStates.H_MATCHING_UPGRADE:
                                 self.index++;
-                                if (self.index > UPGRADE.sizeof-1 || c != UPGRADE[self.index]) {
-                                    self.header_state = H_GENERAL;
-                                } else if (self.index == UPGRADE.sizeof-2) {
-                                    self.header_state = H_UPGRADE;
+                                if (self.index > UPGRADE.len-1 || c != UPGRADE[self.index]) {
+                                    self.header_state = HeaderStates.H_GENERAL;
+                                } else if (self.index == UPGRADE.len-2) {
+                                    self.header_state = HeaderStates.H_UPGRADE;
                                 }
                                 break;
-                            case H_CONNECTION:
-                            case H_CONTENT_LENGTH:
-                            case H_TRANSFER_ENCODING:
-                            case H_UPGRADE:
+                            case HeaderStates.H_CONNECTION:
+                            case HeaderStates.H_CONTENT_LENGTH:
+                            case HeaderStates.H_TRANSFER_ENCODING:
+                            case HeaderStates.H_UPGRADE:
                                 if (ch != ' ') {
-                                    self.header_state = H_GENERAL;
+                                    self.header_state = HeaderStates.H_GENERAL;
                                 }
                                 break;
                             
                             default:
-                                assert(0 && "Unknown Header State");
+                                io::eprintn("Unknown Header State");
                                 break;
                         }
                     }
@@ -1136,12 +1190,144 @@ fn usz HttpParser.execute(HttpParser* self, HttpParserSettings* settings, ZStrin
                     }
                     if (ch == ':') {
                         p_state = S_HEADER_VALUE_DISCARD_WS;
-                        @callback_data(self, settings, p_state, p, data, on_header_field);
+                        @callback_data(self, settings, p_state, p, data, on_header_field, header_field_mark);
                         break;
                     }
 
                     self.http_errno = HttpErrno.INVALID_HEADER_TOKEN;
                     break ERROR;
+                case S_HEADER_VALUE_DISCARD_WS:
+                    if (ch == ' ' || ch == '\t') break;
+
+                    if (ch == '\r') {
+                        p_state = S_HEADER_VALUE_DISCARD_WS_ALMOST_DONE;
+                        break;
+                    }
+
+                    if (ch == '\n') {
+                        p_state = S_HEADER_VALUE_DISCARD_LWS;
+                        break;
+                    }
+                case S_HEADER_VALUE_START:
+                    if (!header_value_mark) {
+                        header_value_mark = p;
+                    }
+
+                    p_state = S_HEADER_VALUE;
+                    self.index = 0;
+                    c = @lower(ch);
+
+                    switch (self.header_state) {
+                        case HeaderStates.H_UPGRADE:
+                            self.flags |= Flags.F_UPGRADE;
+                            self.header_state = HeaderStates.H_GENERAL;
+                            break;
+                        case HeaderStates.H_TRANSFER_ENCODING:
+                            if (c == 'c') {
+                                self.header_state = HeaderStates.H_MATCHING_TRANSFER_ENCODING_CHUNKED;
+                            } else {
+                                self.header_state = HeaderStates.H_GENERAL;
+                            }
+                            break;
+                        case HeaderStates.H_CONTENT_LENGTH:
+                            if (@unlikely(ch < '0' || ch > '9')) {
+                                self.http_errno = HttpErrno.INVALID_CONTENT_LENGTH;
+                                break ERROR;
+                            }
+
+                            self.content_length = (usz) ch - '0';
+                            break;
+                        case HeaderStates.H_CONNECTION:
+                            if (c == 'k') {
+                                self.header_state = HeaderStates.H_MATCHING_CONNECTION_KEEP_ALIVE;
+                            } else if (c == 'c') {
+                                self.header_state = HeaderStates.H_MATCHING_CONNECTION_CLOSE;
+                            } else if (c == 'u') {
+                                self.header_state = HeaderStates.H_MATCHING_CONNECTION_UPGRADE;
+                            } else {
+                                self.header_state = HeaderStates.H_MATCHING_CONNECTION_TOKEN;
+                            }
+                            break;
+                        case HeaderStates.H_MATCHING_CONNECTION_TOKEN_START:
+                            break;
+                        default:
+                            self.header_state = HeaderStates.H_GENERAL;
+                            break;
+                    }
+                    break;
+                case S_HEADER_VALUE:
+                    char* start = p;
+                    HeaderStates h_state = HeaderStates.from_ordinal(self.header_state);
+                    for (; p != data + len; p++) {
+                        ch = *p;
+                        if (ch == '\r') {
+                            p_state = S_HEADER_ALMOST_DONE;
+                            self.header_state = h_state;
+                            @callback_data(self, settings, p_state, p, data, on_header_value, header_value_mark);
+                            break;
+                        }
+
+                        if (ch = '\n') {
+                            p_state = S_HEADER_ALMOST_DONE;
+                            @count_header_size(self, p - start);
+                            self.header_state = h_state;
+                            @callback_data(self, settings, p_state, p, ((char*) data) - 1, on_header_value, header_value_mark);
+                            --p;
+                        }
+
+                        c = @lower(ch);
+
+                        switch (h_state) {
+                            case H_GENERAL:
+                                char* p_cr;
+                                char* p_lf;
+                                usz limit = ((char*) data) + len - p;
+                                limit = min(limit, HTTP_MAX_HEADER_SIZE);
+
+                                p_cr = memchr(p, '\r', limit);
+                                p_lf = memchr(p, '\n', limit);
+                                if (p_cr != null) {
+                                    if (p_lf != null && p_cr >= p_lf) {
+                                        p = p_lf;
+                                    } else {
+                                        p = p_cr;
+                                    }
+                                } else if (@unlikely(p_lf != null)) {
+                                    p = p_lf;
+                                } else {
+                                    p = data + len;
+                                }
+                                --p;
+                                break;
+                            case H_CONNECTION:
+                            case H_TRANSFER_ENCODING:
+                                break;
+                            case H_CONTENT_LENGTH:
+                                if (ch == ' ') break;
+                                usz t;
+
+                                if (@unlikely(ch < '0' || ch > '9')) {
+                                    self.http_errno = HttpErrno.INVALID_CONTENT_LENGTH;
+                                    self.header_state = h_state;
+                                    break ERROR;
+                                }
+
+                                t = self.content_length;
+                                t *= 10;
+                                t += ch - '0';
+
+                                if (@unlikely((usz.max - 10) / 10 < self.content_length)) {
+                                    self.http_errno = INVALID_CONTENT_LENGTH;
+                                    self.header_state = h_state;
+                                    break ERROR;
+                                }
+
+                                self.content_length = t;
+                                break;
+                            case 
+                        }
+                    }
+                    
             }
         }
     } while(0);
